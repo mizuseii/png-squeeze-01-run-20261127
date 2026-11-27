@@ -343,19 +343,22 @@ const chunkBytes = (form: Form): number =>
 // ---------- encode one image ----------
 function encodeImage(rgba: Uint8Array, width: number, height: number): Uint8Array {
   // Screen all forms/filter choices at zlib level 6, remembering the winning
-  // (form, choice); then re-filter once and encode at level 9, best strategy.
+  // (form, choice) and its already-filtered bytes (re-filtering the winner
+  // would repeat the most expensive filter pass, e.g. brute); then encode
+  // the winning bytes at level 9, best strategy.
   let win: { form: Form; choice: number | string; bytes: number } | null = null;
+  let winData: Uint8Array | null = null;
   for (const form of formsOf(rgba)) {
     const chunks = chunkBytes(form);
     for (const choice of form.filters) {
       const data = filtered(form.samples, width, height, form.bpp, choice);
       const zlib = deflateSync(data, { level: 6, memLevel: 8 });
       const bytes = zlib.length + chunks;
-      if (win === null || bytes < win.bytes) win = { form, choice, bytes };
+      if (win === null || bytes < win.bytes) { win = { form, choice, bytes }; winData = data; }
     }
   }
-  if (win === null) throw new Error('no form');
-  const data = filtered(win.form.samples, width, height, win.form.bpp, win.choice);
+  if (win === null || winData === null) throw new Error('no form');
+  const data = winData;
   // Final: my optimal-parsing deflate, with zlib level 9 as a safety net (take smaller).
   let bestZ = deflateOptimal(data);
   const z9 = deflateSync(data, { level: 9, memLevel: 9 });
@@ -397,7 +400,7 @@ const FIXED_LITLEN: Uint8Array = (() => {
   return t;
 })();
 const FIXED_DISTLEN: Uint8Array = new Uint8Array(30).fill(5);
-const MAX_CHAIN = 1024;
+const MAX_CHAIN = 256;
 const DEFLATE_BLOCK = 262144;
 
 function adler32(bytes: Uint8Array): number {
@@ -589,6 +592,11 @@ function findMatches(data: Uint8Array): Matches {
         const len = matchLen(cur, i, maxLen);
         if (len > nearLen) { nearLen = len; nearDist = dist; }
       }
+      // Exact early exit: bestLen is maxed (no candidate can beat it), and
+      // nearLen is final too — remaining candidates are farther than this
+      // one, so if this one was within 1024 nearLen is already maxed, and if
+      // it was beyond 1024 no later candidate can be a near candidate.
+      if (bestLen >= maxLen) break;
       cur = prev[cur];
     }
     mLen[i] = bestLen; mDist[i] = bestDist; mLen2[i] = nearLen; mDist2[i] = nearDist;
